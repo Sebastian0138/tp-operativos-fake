@@ -24,9 +24,21 @@ void memoria_stick_destroy(t_memoria_stick* memoria) {
     free(memoria);
 }
 
+// Devuelve true si el rango [dir, dir + tamanio) cae entero dentro del bloque
+// de memoria (que va de 0 a memoria->tamanio).
+//
+// Ojo: NO escribimos "dir + tamanio <= memoria->tamanio" porque dir y tamanio
+// son uint32 y esa suma podria desbordar (dar la vuelta a un numero chico) y
+// pasar el chequeo siendo invalida. Por eso lo verificamos en dos partes que
+// nunca desbordan:
+//   1) que el inicio no se pase del final del bloque, y
+//   2) que lo que queda de bloque desde `dir` alcance para `tamanio` bytes.
 static bool rango_valido(t_memoria_stick* memoria, uint32_t dir, uint32_t tamanio) {
-    // Comparacion sin overflow: dir + tamanio podria dar vuelta en uint32.
-    return dir <= memoria->tamanio && tamanio <= memoria->tamanio - dir;
+    bool inicio_dentro_del_bloque = dir <= memoria->tamanio;
+    uint32_t espacio_disponible_desde_dir = memoria->tamanio - dir;
+    bool entran_los_bytes_pedidos = tamanio <= espacio_disponible_desde_dir;
+
+    return inicio_dentro_del_bloque && entran_los_bytes_pedidos;
 }
 
 bool memoria_stick_leer(t_memoria_stick* memoria, uint32_t dir, uint32_t tamanio, void* destino) {

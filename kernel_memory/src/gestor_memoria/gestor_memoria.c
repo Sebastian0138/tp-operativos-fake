@@ -166,44 +166,70 @@ static t_segmento_fisico** segmentos_ordenados(t_gestor_memoria* gm, int* cant_o
     return arr;
 }
 
+// Devuelve true si la estrategia de asignacion configurada es BEST FIT.
+// Por defecto se usa BEST FIT; solo se usa WORST FIT si ALLOCATION_STRATEGY
+// vale exactamente "WORST".
+static bool estrategia_es_best_fit(t_gestor_memoria* gm) {
+    return strcmp(gm->config->allocation_strategy, "WORST") != 0;
+}
+
+// Decide si un hueco candidato es mejor que el mejor hueco encontrado hasta ahora.
+//   - Si todavia no hay ningun candidato, cualquier hueco que entre sirve.
+//   - BEST FIT: gana el hueco mas chico (deja menos desperdicio).
+//   - WORST FIT: gana el hueco mas grande.
+static bool hueco_es_mejor_que_el_actual(bool best_fit, bool hay_candidato_previo,
+                                         uint32_t tamanio_candidato,
+                                         uint32_t tamanio_mejor_actual) {
+    if (!hay_candidato_previo) return true;
+    if (best_fit) return tamanio_candidato < tamanio_mejor_actual;
+    return tamanio_candidato > tamanio_mejor_actual;
+}
+
 // Busca el hueco segun ALLOCATION_STRATEGY (BEST/WORST) donde entre `tamanio`.
 // Devuelve true y deja la base del hueco elegido en *base_out.
 // Debe llamarse con gm->mutex tomado.
 static bool buscar_hueco(t_gestor_memoria* gm, uint32_t tamanio, uint32_t* base_out) {
-    bool best = strcmp(gm->config->allocation_strategy, "WORST") != 0; // default BEST
+    bool best_fit = estrategia_es_best_fit(gm);
 
-    int cant;
-    t_segmento_fisico** arr = segmentos_ordenados(gm, &cant);
+    // Segmentos ocupados, ordenados por direccion base. Los huecos libres son
+    // los espacios que quedan entre uno y el siguiente.
+    int cantidad_segmentos;
+    t_segmento_fisico** segmentos = segmentos_ordenados(gm, &cantidad_segmentos);
 
-    bool encontrado = false;
-    uint32_t mejor_base = 0;
-    uint32_t mejor_tamanio = 0;
+    bool hay_candidato = false;
+    uint32_t base_elegida = 0;
+    uint32_t tamanio_elegido = 0;
 
-    uint32_t cursor = 0;
-    for (int i = 0; i <= cant; i++) {
-        uint32_t fin_hueco = (i < cant) ? arr[i]->base : gm->memoria_total;
-        if (fin_hueco > cursor) {
-            uint32_t tam_hueco = fin_hueco - cursor;
-            if (tam_hueco >= tamanio) {
-                bool mejora = !encontrado
-                    || (best  && tam_hueco < mejor_tamanio)
-                    || (!best && tam_hueco > mejor_tamanio);
-                if (mejora) {
-                    encontrado = true;
-                    mejor_base = cursor;
-                    mejor_tamanio = tam_hueco;
-                }
+    // Recorremos la memoria de principio a fin. `inicio_hueco` marca donde
+    // arranca el proximo espacio libre. En cada vuelta miramos el hueco que va
+    // desde `inicio_hueco` hasta el comienzo del siguiente segmento ocupado
+    // (o hasta el final de la memoria, en la ultima vuelta).
+    uint32_t inicio_hueco = 0;
+    for (int i = 0; i <= cantidad_segmentos; i++) {
+        bool quedan_segmentos = (i < cantidad_segmentos);
+        uint32_t fin_hueco = quedan_segmentos ? segmentos[i]->base : gm->memoria_total;
+
+        if (fin_hueco > inicio_hueco) {
+            uint32_t tamanio_hueco = fin_hueco - inicio_hueco;
+            bool el_pedido_entra = tamanio_hueco >= tamanio;
+            if (el_pedido_entra &&
+                hueco_es_mejor_que_el_actual(best_fit, hay_candidato, tamanio_hueco, tamanio_elegido)) {
+                hay_candidato = true;
+                base_elegida = inicio_hueco;
+                tamanio_elegido = tamanio_hueco;
             }
         }
-        if (i < cant) {
-            uint32_t fin_seg = arr[i]->base + arr[i]->tamanio;
-            if (fin_seg > cursor) cursor = fin_seg;
+
+        // Preparamos el arranque del proximo hueco: justo despues del segmento actual.
+        if (quedan_segmentos) {
+            uint32_t fin_segmento = segmentos[i]->base + segmentos[i]->tamanio;
+            if (fin_segmento > inicio_hueco) inicio_hueco = fin_segmento;
         }
     }
 
-    free(arr);
-    if (encontrado) *base_out = mejor_base;
-    return encontrado;
+    free(segmentos);
+    if (hay_candidato) *base_out = base_elegida;
+    return hay_candidato;
 }
 
 // Espacio libre con gm->mutex tomado
@@ -463,71 +489,104 @@ bool gestor_memoria_traducir(t_gestor_memoria* gm, uint32_t pid, uint32_t dir_lo
 // Compactacion
 // ============================================================
 
+// Copia `tamanio` bytes entre la memoria fisica y un `buffer` en RAM local.
+// La memoria fisica esta repartida en varios sticks, asi que el rango que
+// arranca en `dir_fisica` puede cruzar la frontera de uno o mas sticks: por eso
+// vamos avanzando de a "tramos", tomando en cada paso solo lo que entra en el
+// stick actual.
+//   - escribir == false: copia sticks -> buffer (lectura).
+//   - escribir == true : copia buffer -> sticks (escritura).
+// Debe llamarse con gm->mutex tomado (opera los sticks directo, sin re-lockear).
+static void copiar_segmento_entre_sticks(t_gestor_memoria* gm, uint32_t dir_fisica,
+                                         uint32_t tamanio, char* buffer, bool escribir) {
+    uint32_t bytes_restantes = tamanio;
+    uint32_t dir_actual = dir_fisica;
+    char* posicion_en_buffer = buffer;
+
+    while (bytes_restantes > 0) {
+        t_stick* stick = stick_para_direccion(gm, dir_actual);
+        if (stick == NULL) break;
+
+        uint32_t offset_en_stick = dir_actual - stick->base;
+        uint32_t bytes_hasta_fin_del_stick = stick->tamanio - offset_en_stick;
+
+        // El tramo de esta vuelta es lo que falta, o lo que queda de stick: lo que sea menor.
+        uint32_t tramo = bytes_restantes < bytes_hasta_fin_del_stick
+                       ? bytes_restantes
+                       : bytes_hasta_fin_del_stick;
+
+        stick_operar(gm, stick, escribir, offset_en_stick, tramo, posicion_en_buffer);
+
+        dir_actual += tramo;
+        posicion_en_buffer += tramo;
+        bytes_restantes -= tramo;
+    }
+}
+
+// Refleja en la tabla de segmentos del proceso duenio que uno de sus segmentos
+// se movio a una nueva base (durante la compactacion).
+static void actualizar_base_de_segmento_en_proceso(t_gestor_memoria* gm, uint32_t pid,
+                                                   uint32_t id_segmento,
+                                                   uint32_t nueva_base, uint32_t tamanio) {
+    gestor_lock(gm->gestor_procesos);
+
+    t_proceso_km* proceso = gestor_buscar_proceso_sin_lock(gm->gestor_procesos, pid);
+    if (proceso != NULL) {
+        for (int j = 0; j < list_size(proceso->contexto->tabla_segmentos); j++) {
+            t_segmento* entrada = list_get(proceso->contexto->tabla_segmentos, j);
+            if (entrada->id_segmento == id_segmento) {
+                entrada->base = nueva_base;
+                entrada->limite = nueva_base + tamanio - 1;
+                break;
+            }
+        }
+    }
+
+    gestor_unlock(gm->gestor_procesos);
+}
+
+// Mueve un segmento desplazado a su nueva base, "amontonandolo" al principio de
+// la memoria: lo lee a un buffer, lo reescribe en la nueva base, avisa al proceso
+// duenio y actualiza su registro fisico.
+static void mover_segmento(t_gestor_memoria* gm, t_segmento_fisico* seg, uint32_t nueva_base) {
+    char* buffer = malloc(seg->tamanio);
+
+    // 1) Leer el segmento completo de su ubicacion actual.
+    copiar_segmento_entre_sticks(gm, seg->base, seg->tamanio, buffer, false);
+    // 2) Reescribirlo en su nueva base (puede caer en otro stick).
+    copiar_segmento_entre_sticks(gm, nueva_base, seg->tamanio, buffer, true);
+
+    free(buffer);
+
+    // 3) Reflejar el movimiento en la tabla del proceso y en el registro fisico.
+    actualizar_base_de_segmento_en_proceso(gm, seg->pid, seg->id_segmento, nueva_base, seg->tamanio);
+    seg->base = nueva_base;
+}
+
 void gestor_memoria_compactar(t_gestor_memoria* gm) {
     log_info(gm->logger, "## Inicio de compactación");
 
     pthread_mutex_lock(&gm->mutex);
 
-    int cant;
-    t_segmento_fisico** arr = segmentos_ordenados(gm, &cant);
+    int cantidad_segmentos;
+    t_segmento_fisico** segmentos = segmentos_ordenados(gm, &cantidad_segmentos);
 
-    uint32_t cursor = 0;
-    for (int i = 0; i < cant; i++) {
-        t_segmento_fisico* seg = arr[i];
-        if (seg->base != cursor) {
-            // Mover los datos: se lee el segmento completo y se escribe en su
-            // nueva base (puede cambiar parcial o totalmente de stick).
-            char* buffer = malloc(seg->tamanio);
+    // Recorremos los segmentos ya ordenados por base y los amontonamos al
+    // principio de la memoria, sin dejar huecos. `proxima_base_libre` es la
+    // direccion donde deberia arrancar el segmento actual.
+    uint32_t proxima_base_libre = 0;
+    for (int i = 0; i < cantidad_segmentos; i++) {
+        t_segmento_fisico* seg = segmentos[i];
 
-            // Se opera con los sticks directamente (sin re-tomar gm->mutex):
-            // replicamos la logica de operar_fisico de forma inline.
-            uint32_t restante = seg->tamanio;
-            uint32_t dir = seg->base;
-            char* p = buffer;
-            while (restante > 0) {
-                t_stick* stick = stick_para_direccion(gm, dir);
-                if (stick == NULL) break;
-                uint32_t dir_local = dir - stick->base;
-                uint32_t tramo = restante < stick->tamanio - dir_local ? restante : stick->tamanio - dir_local;
-                stick_operar(gm, stick, false, dir_local, tramo, p);
-                dir += tramo; p += tramo; restante -= tramo;
-            }
-
-            restante = seg->tamanio;
-            dir = cursor;
-            p = buffer;
-            while (restante > 0) {
-                t_stick* stick = stick_para_direccion(gm, dir);
-                if (stick == NULL) break;
-                uint32_t dir_local = dir - stick->base;
-                uint32_t tramo = restante < stick->tamanio - dir_local ? restante : stick->tamanio - dir_local;
-                stick_operar(gm, stick, true, dir_local, tramo, p);
-                dir += tramo; p += tramo; restante -= tramo;
-            }
-
-            free(buffer);
-
-            // Actualizar la tabla de segmentos del proceso duenio
-            gestor_lock(gm->gestor_procesos);
-            t_proceso_km* proc = gestor_buscar_proceso_sin_lock(gm->gestor_procesos, seg->pid);
-            if (proc != NULL) {
-                for (int j = 0; j < list_size(proc->contexto->tabla_segmentos); j++) {
-                    t_segmento* entrada = list_get(proc->contexto->tabla_segmentos, j);
-                    if (entrada->id_segmento == seg->id_segmento) {
-                        entrada->base = cursor;
-                        entrada->limite = cursor + seg->tamanio - 1;
-                        break;
-                    }
-                }
-            }
-            gestor_unlock(gm->gestor_procesos);
-
-            seg->base = cursor;
+        bool esta_desplazado = (seg->base != proxima_base_libre);
+        if (esta_desplazado) {
+            mover_segmento(gm, seg, proxima_base_libre);
         }
-        cursor += seg->tamanio;
+
+        proxima_base_libre += seg->tamanio;
     }
 
-    free(arr);
+    free(segmentos);
     pthread_mutex_unlock(&gm->mutex);
 
     // Tiempo de espera configurado antes de dar por finalizada la compactacion
@@ -862,44 +921,68 @@ bool gestor_memoria_io_rw(t_gestor_memoria* gm, uint32_t pid, uint32_t dir_logic
 // Topologia de sticks para las CPUs
 // ============================================================
 
+// Escribe un uint32 en la posicion `p` del buffer y devuelve `p` avanzado 4 bytes.
+static char* escribir_uint32(char* p, uint32_t valor) {
+    memcpy(p, &valor, sizeof(uint32_t));
+    return p + sizeof(uint32_t);
+}
+
+// Escribe un string con prefijo de longitud: primero un uint32 con el largo del
+// string y despues sus bytes (sin el '\0' final). Devuelve `p` avanzado.
+static char* escribir_string_con_longitud(char* p, const char* str) {
+    uint32_t longitud = strlen(str);
+    p = escribir_uint32(p, longitud);
+    memcpy(p, str, longitud);
+    return p + longitud;
+}
+
+// Calcula cuantos bytes ocupa la topologia serializada y, de paso, cuenta los
+// sticks conectados (lo deja en *cant_out). El formato es: un uint32 con la
+// cantidad de sticks, y por cada stick conectado: id + tamanio + base (3 uint32)
+// mas ip y puerto (cada string precedido por su longitud en un uint32).
+static uint32_t tamanio_topologia_serializada(t_gestor_memoria* gm, uint32_t* cant_out) {
+    uint32_t total = sizeof(uint32_t); // el uint32 inicial con la cantidad de sticks
+    uint32_t cantidad_conectados = 0;
+
+    for (int i = 0; i < list_size(gm->sticks); i++) {
+        t_stick* stick = list_get(gm->sticks, i);
+        if (!stick->conectado) continue;
+
+        cantidad_conectados++;
+        total += 3 * sizeof(uint32_t);                      // id, tamanio, base
+        total += sizeof(uint32_t) + strlen(stick->ip);      // longitud + ip
+        total += sizeof(uint32_t) + strlen(stick->puerto);  // longitud + puerto
+    }
+
+    *cant_out = cantidad_conectados;
+    return total;
+}
+
 void* gestor_memoria_serializar_topologia(t_gestor_memoria* gm, uint32_t* tamanio_out) {
     pthread_mutex_lock(&gm->mutex);
 
-    // Calcular tamanio del buffer
-    uint32_t total = sizeof(uint32_t); // cant
-    uint32_t cant = 0;
-    for (int i = 0; i < list_size(gm->sticks); i++) {
-        t_stick* stick = list_get(gm->sticks, i);
-        if (!stick->conectado) continue;
-        cant++;
-        total += 3 * sizeof(uint32_t);                      // id, tamanio, base
-        total += sizeof(uint32_t) + strlen(stick->ip);      // ip
-        total += sizeof(uint32_t) + strlen(stick->puerto);  // puerto
-    }
+    // Primera pasada: averiguar el tamanio exacto del buffer y cuantos sticks entran.
+    uint32_t cantidad_sticks;
+    uint32_t tamanio_total = tamanio_topologia_serializada(gm, &cantidad_sticks);
 
-    char* buffer = malloc(total);
+    char* buffer = malloc(tamanio_total);
+
+    // Segunda pasada: llenar el buffer. `p` va avanzando a medida que escribimos.
     char* p = buffer;
-
-    memcpy(p, &cant, sizeof(uint32_t)); p += sizeof(uint32_t);
+    p = escribir_uint32(p, cantidad_sticks);
     for (int i = 0; i < list_size(gm->sticks); i++) {
         t_stick* stick = list_get(gm->sticks, i);
         if (!stick->conectado) continue;
 
-        memcpy(p, &stick->id, sizeof(uint32_t)); p += sizeof(uint32_t);
-        memcpy(p, &stick->tamanio, sizeof(uint32_t)); p += sizeof(uint32_t);
-        memcpy(p, &stick->base, sizeof(uint32_t)); p += sizeof(uint32_t);
-
-        uint32_t ip_len = strlen(stick->ip);
-        memcpy(p, &ip_len, sizeof(uint32_t)); p += sizeof(uint32_t);
-        memcpy(p, stick->ip, ip_len); p += ip_len;
-
-        uint32_t port_len = strlen(stick->puerto);
-        memcpy(p, &port_len, sizeof(uint32_t)); p += sizeof(uint32_t);
-        memcpy(p, stick->puerto, port_len); p += port_len;
+        p = escribir_uint32(p, stick->id);
+        p = escribir_uint32(p, stick->tamanio);
+        p = escribir_uint32(p, stick->base);
+        p = escribir_string_con_longitud(p, stick->ip);
+        p = escribir_string_con_longitud(p, stick->puerto);
     }
 
     pthread_mutex_unlock(&gm->mutex);
 
-    *tamanio_out = total;
+    *tamanio_out = tamanio_total;
     return buffer;
 }
