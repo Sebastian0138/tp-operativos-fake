@@ -1,0 +1,6 @@
+MUTEX_CREATE M
+INIT_PROC test_herencia_bajo 2
+SLEEP 1000
+INIT_PROC test_herencia_alto 1
+SLEEP 4000
+EXIT

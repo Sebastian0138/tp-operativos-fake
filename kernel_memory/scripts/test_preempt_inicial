@@ -1,0 +1,3 @@
+INIT_PROC test_busy 2
+SLEEP 1000
+EXIT
