@@ -1,0 +1,4 @@
+SET CX 1
+NOOP
+NOOP
+JNZ CX 1

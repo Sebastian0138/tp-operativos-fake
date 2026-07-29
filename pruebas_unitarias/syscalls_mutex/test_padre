@@ -1,0 +1,6 @@
+INIT_PROC test_mtx_duenio 0
+SLEEP 1000
+INIT_PROC test_mtx_espera 0
+INIT_PROC test_mtx_espera 0
+INIT_PROC test_mtx_espera 0
+EXIT

@@ -1,0 +1,4 @@
+INIT_PROC test_sys_cpu 0
+INIT_PROC test_sys_syscalls 0
+INIT_PROC test_sys_cpu 0
+EXIT

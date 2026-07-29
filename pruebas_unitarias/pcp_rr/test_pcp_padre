@@ -1,0 +1,4 @@
+INIT_PROC test_pcp_cpu 0
+INIT_PROC test_pcp_cpu 0
+INIT_PROC test_pcp_cpu 0
+EXIT

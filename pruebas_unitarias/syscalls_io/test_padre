@@ -1,0 +1,3 @@
+INIT_PROC test_io_ciclo 0
+INIT_PROC test_io_cpu 0
+EXIT

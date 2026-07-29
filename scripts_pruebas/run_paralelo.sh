@@ -3,8 +3,8 @@
 # - rango de puertos propio por prueba (BASE_PORT + slot*20)
 # - copia de binarios y configs generadas -> logs y swap.bin aislados
 # Resultado en $PAR/<prueba>/  (logs de todos los modulos)
-SCRATCH=/home/sepo010/Escritorio/tp-2026-1c-Holy-OS/scripts_pruebas
-REPO=/home/sepo010/Escritorio/tp-2026-1c-Holy-OS
+SCRATCH=/home/sepo010/Escritorio/tp-operativos-fake/scripts_pruebas
+REPO=/home/sepo010/Escritorio/tp-operativos-fake
 PRUEBAS=$REPO/plug-n-pray-pruebas-main
 PAR=$SCRATCH/paralelo
 rm -rf $PAR

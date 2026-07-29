@@ -1,0 +1,5 @@
+INIT_PROC test_mtx_suicida 0
+SLEEP 1500
+INIT_PROC test_mtx_espera_1 0
+INIT_PROC test_mtx_espera_2 0
+EXIT
