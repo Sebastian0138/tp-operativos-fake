@@ -1,0 +1,4 @@
+# Upstream clone of the cátedra's test-script repository.
+# The scripts themselves are vendored under pruebas_oficiales/plug-n-pray-pruebas/,
+# which is what SCRIPTS_BASEPATH in kernel_memory/config/*.cfg points to.
+/plug-n-pray-pruebas/
