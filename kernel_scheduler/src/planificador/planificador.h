@@ -46,9 +46,13 @@ typedef struct {
     uint32_t rafaga;
 
     t_motivo_interrupcion motivo_interrupcion;
-    // Datos para el log de desalojo por cola mas prioritaria
+    // Datos para el log de desalojo por cola mas prioritaria. Se completan al
+    // enviar la interrupcion y los consume el hilo que atiende la respuesta de
+    // la CPU, que es quien emite el log obligatorio (recien ahi se sabe que el
+    // proceso volvio efectivamente por la interrupcion y no por una syscall).
     uint32_t pid_preemptor;
     int prioridad_preemptor;
+    int prioridad_victima;
 } t_cpu_conectada;
 
 /**
@@ -115,6 +119,8 @@ typedef struct {
 
     // Mediano plazo
     pthread_mutex_t mutex_cola_susp;        // protege cola_susp_block y cola_susp_ready
+    // Mantiene juntos la transicion de fin de IO y sus dos logs obligatorios
+    pthread_mutex_t mutex_fin_io;
     t_list* lista_espera_memoria;           // t_espera_memoria*: MEM_ALLOC sin espacio, esperando
     pthread_mutex_t mutex_espera_memoria;
     pthread_mutex_t mutex_evento_memoria;   // serializa des-suspensiones y reintentos de alloc

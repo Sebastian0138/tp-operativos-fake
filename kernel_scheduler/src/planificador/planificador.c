@@ -59,10 +59,15 @@ static void chequear_desalojo_por_prioridad(t_planificador* pl, t_pcb* nuevo) {
             cpu->motivo_interrupcion = INT_PREEMPCION;
             cpu->pid_preemptor = nuevo->pid;
             cpu->prioridad_preemptor = nuevo->prioridad_actual;
+            cpu->prioridad_victima = victima_prio;
 
-            log_info(pl->logger,
-                "## (%u) Prioridad: %d Desalojado por cola más prioritaria por el proceso %u con prioridad %d",
-                victima_pid, victima_prio, nuevo->pid, nuevo->prioridad_actual);
+            // El log obligatorio del desalojo lo emite el hilo que atiende la
+            // respuesta de la CPU: hasta que el proceso no vuelva por la
+            // interrupcion, el desalojo todavia no ocurrio (puede volver antes
+            // por syscall o EXIT y entonces nunca se lo desaloja).
+            log_debug(pl->logger,
+                "Interrupción por cola más prioritaria enviada: PID %u (prioridad %d) en CPU %d, preemptor PID %u (prioridad %d)",
+                victima_pid, victima_prio, cpu->id_cpu, nuevo->pid, nuevo->prioridad_actual);
 
             t_codigo_mensaje msg = MENSAJE_INTERRUPCION;
             send(cpu->socket_cpu, &msg, sizeof(t_codigo_mensaje), 0);
@@ -73,8 +78,8 @@ static void chequear_desalojo_por_prioridad(t_planificador* pl, t_pcb* nuevo) {
 }
 
 // Inserta el PCB en su cola READY (al final, o al principio para el desalojo
-// por compactacion) y dispara el chequeo de desalojo entre colas.
-static void encolar_en_ready(t_planificador* pl, t_pcb* pcb, bool al_frente) {
+// por compactacion) SIN avisarle todavia al corto plazo.
+static void insertar_en_ready(t_planificador* pl, t_pcb* pcb, bool al_frente) {
     int q = cola_de(pl, pcb);
 
     pthread_mutex_lock(&pl->mutex_cola_ready);
@@ -84,13 +89,41 @@ static void encolar_en_ready(t_planificador* pl, t_pcb* pcb, bool al_frente) {
         list_add(pl->colas_ready[q], pcb);
     }
     pthread_mutex_unlock(&pl->mutex_cola_ready);
+}
 
+// Habilita al corto plazo a tomar el proceso ya encolado y dispara el chequeo
+// de desalojo entre colas. Se llama SIEMPRE despues de haber emitido los logs
+// de la transicion a READY: el corto plazo loguea "Pasa del estado READY al
+// estado EXEC", y si se lo señaliza antes de terminar de loguear, ese log se
+// puede intercalar en medio de los de la transicion.
+static void habilitar_corto_plazo(t_planificador* pl, t_pcb* pcb, bool al_frente) {
     sem_post(&pl->sem_procesos_ready);
 
     // Durante el desalojo por compactacion no tiene sentido desalojar de nuevo
     if (!al_frente) {
         chequear_desalojo_por_prioridad(pl, pcb);
     }
+}
+
+static void encolar_en_ready(t_planificador* pl, t_pcb* pcb, bool al_frente) {
+    insertar_en_ready(pl, pcb, al_frente);
+    habilitar_corto_plazo(pl, pcb, al_frente);
+}
+
+// Saca de una cola el PCB con ese PID, preservando el orden de los demas.
+// El caller debe tener tomado el mutex que protege la cola.
+static t_pcb* sacar_de_cola_sin_lock(t_queue* cola, uint32_t pid) {
+    t_pcb* encontrado = NULL;
+    int size = queue_size(cola);
+    for (int i = 0; i < size; i++) {
+        t_pcb* p = queue_pop(cola);
+        if (p->pid == pid && encontrado == NULL) {
+            encontrado = p;
+        } else {
+            queue_push(cola, p);
+        }
+    }
+    return encontrado;
 }
 
 // Saca el proceso mas prioritario de READY (cola de menor indice, posicion 0).
@@ -174,6 +207,7 @@ t_planificador* planificador_create(t_kernel_scheduler_config* config, t_log* lo
     pthread_cond_init(&pl->cond_compactacion, NULL);
 
     pthread_mutex_init(&pl->mutex_cola_susp, NULL);
+    pthread_mutex_init(&pl->mutex_fin_io, NULL);
     pl->lista_espera_memoria = list_create();
     pthread_mutex_init(&pl->mutex_espera_memoria, NULL);
     pthread_mutex_init(&pl->mutex_evento_memoria, NULL);
@@ -233,6 +267,7 @@ void planificador_destroy(t_planificador* pl) {
     pthread_cond_destroy(&pl->cond_compactacion);
 
     pthread_mutex_destroy(&pl->mutex_cola_susp);
+    pthread_mutex_destroy(&pl->mutex_fin_io);
     list_destroy_and_destroy_elements(pl->lista_espera_memoria, free);
     pthread_mutex_destroy(&pl->mutex_espera_memoria);
     pthread_mutex_destroy(&pl->mutex_evento_memoria);
@@ -368,9 +403,17 @@ static void despachar(t_planificador* pl, t_pcb* pcb, t_cpu_conectada* cpu) {
         t_args->id_cpu = id_cpu;
         t_args->rafaga = rafaga;
 
+        // Detached: el hilo libera sus recursos al terminar, nadie lo joinea.
+        // Si no se pudo crear hay que liberar los args a mano (si no, se pierden)
+        // y el proceso queda sin timer: se avisa en vez de fallar en silencio.
         pthread_t t_hilo;
-        pthread_create(&t_hilo, NULL, hilo_timer_quantum, t_args);
-        pthread_detach(t_hilo);
+        if (pthread_create(&t_hilo, NULL, hilo_timer_quantum, t_args) != 0) {
+            log_error(pl->logger, "No se pudo crear el hilo de quantum para PID %u en CPU %d",
+                      pcb->pid, id_cpu);
+            free(t_args);
+        } else {
+            pthread_detach(t_hilo);
+        }
     }
 }
 
@@ -605,35 +648,55 @@ void planificador_transicionar_exec_a_block(t_planificador* pl, t_pcb* pcb, cons
     }
 }
 
-t_pcb* planificador_transicionar_block_a_ready(t_planificador* pl, t_pcb* pcb) {
+// Pasa el PCB de BLOCK a READY sin encolarlo ni loguear: devuelve el PCB real
+// (o NULL si no estaba en cola_block) y deja en *anterior el estado previo, para
+// que el caller decida cuando loguear y cuando señalizar al corto plazo.
+static t_pcb* block_a_ready_sin_encolar(t_planificador* pl, uint32_t pid, t_estado_proceso* anterior) {
     pthread_mutex_lock(&pl->mutex_cola_block);
-    // Buscar y remover de la cola block
-    t_pcb* encontrado = NULL;
-    int size = queue_size(pl->cola_block);
-    for (int i = 0; i < size; i++) {
-        t_pcb* p = queue_pop(pl->cola_block);
-        if (p->pid == pcb->pid) {
-            encontrado = p;
-        } else {
-            queue_push(pl->cola_block, p); // Volver a encolar
-        }
-    }
+    t_pcb* encontrado = sacar_de_cola_sin_lock(pl->cola_block, pid);
     pthread_mutex_unlock(&pl->mutex_cola_block);
 
-    if (encontrado != NULL) {
-        t_estado_proceso anterior = encontrado->estado;
-        encontrado->estado = ESTADO_READY;
-        encontrado->bloqueo_id++;   // invalida el timer de suspension pendiente
-        if (encontrado->motivo_bloqueo) {
-            free(encontrado->motivo_bloqueo);
-            encontrado->motivo_bloqueo = NULL;
-        }
-        clock_gettime(CLOCK_MONOTONIC, &(encontrado->ts_llegada_ready));
+    if (encontrado == NULL) return NULL;
 
+    *anterior = encontrado->estado;
+    encontrado->estado = ESTADO_READY;
+    encontrado->bloqueo_id++;   // invalida el timer de suspension pendiente
+    if (encontrado->motivo_bloqueo) {
+        free(encontrado->motivo_bloqueo);
+        encontrado->motivo_bloqueo = NULL;
+    }
+    clock_gettime(CLOCK_MONOTONIC, &(encontrado->ts_llegada_ready));
+
+    return encontrado;
+}
+
+t_pcb* planificador_transicionar_block_a_ready(t_planificador* pl, t_pcb* pcb) {
+    t_estado_proceso anterior;
+    t_pcb* encontrado = block_a_ready_sin_encolar(pl, pcb->pid, &anterior);
+
+    if (encontrado != NULL) {
         log_info(pl->logger, "## (%u) Pasa del estado %s al estado READY", encontrado->pid, estado_to_string(anterior));
         encolar_en_ready(pl, encontrado, false);
     }
 
+    return encontrado;
+}
+
+// Pasa el PCB de SUSP. BLOCK a SUSP. READY (la memoria sigue en SWAP) sin
+// loguear. Devuelve NULL si no estaba suspendido.
+static t_pcb* susp_block_a_susp_ready_sin_loguear(t_planificador* pl, uint32_t pid, t_estado_proceso* anterior) {
+    pthread_mutex_lock(&pl->mutex_cola_susp);
+    t_pcb* encontrado = sacar_de_cola_sin_lock(pl->cola_susp_block, pid);
+    if (encontrado != NULL) {
+        *anterior = encontrado->estado;
+        encontrado->estado = ESTADO_SUSP_READY;
+        if (encontrado->motivo_bloqueo) {
+            free(encontrado->motivo_bloqueo);
+            encontrado->motivo_bloqueo = NULL;
+        }
+        queue_push(pl->cola_susp_ready, encontrado);
+    }
+    pthread_mutex_unlock(&pl->mutex_cola_susp);
     return encontrado;
 }
 
@@ -647,32 +710,54 @@ t_pcb* planificador_desbloquear(t_planificador* pl, uint32_t pid, bool* estaba_s
     if (despertado != NULL) return despertado;
 
     // Estaba suspendido: SUSP. BLOCK -> SUSP. READY (la memoria sigue en SWAP)
-    pthread_mutex_lock(&pl->mutex_cola_susp);
-    t_pcb* encontrado = NULL;
-    int size = queue_size(pl->cola_susp_block);
-    for (int i = 0; i < size; i++) {
-        t_pcb* p = queue_pop(pl->cola_susp_block);
-        if (p->pid == pid) {
-            encontrado = p;
-        } else {
-            queue_push(pl->cola_susp_block, p);
-        }
-    }
+    t_estado_proceso anterior;
+    t_pcb* encontrado = susp_block_a_susp_ready_sin_loguear(pl, pid, &anterior);
     if (encontrado != NULL) {
-        t_estado_proceso anterior = encontrado->estado;
-        encontrado->estado = ESTADO_SUSP_READY;
-        if (encontrado->motivo_bloqueo) {
-            free(encontrado->motivo_bloqueo);
-            encontrado->motivo_bloqueo = NULL;
-        }
-        queue_push(pl->cola_susp_ready, encontrado);
         log_info(pl->logger, "## (%u) Pasa del estado %s al estado %s",
                  encontrado->pid, estado_to_string(anterior), estado_to_string(ESTADO_SUSP_READY));
         *estaba_suspendido = true;
     }
-    pthread_mutex_unlock(&pl->mutex_cola_susp);
 
     return encontrado;
+}
+
+// Desbloqueo por fin de IO. La transicion y los DOS logs obligatorios que le
+// corresponden ("Pasa del estado BLOCK al estado READY" y "finalizó IO y pasa a
+// READY") se emiten bajo el mismo lock, y al corto plazo se lo señaliza recien
+// despues de haber logueado. Sin eso, el "Pasa del estado READY al estado EXEC"
+// del corto plazo se intercala entre los dos y queda un proceso en EXEC antes de
+// que termine su IO; y dos fines de IO simultaneos mezclan sus pares de logs.
+static t_pcb* desbloquear_por_fin_io(t_planificador* pl, uint32_t pid, bool* estaba_suspendido) {
+    *estaba_suspendido = false;
+
+    pthread_mutex_lock(&pl->mutex_fin_io);
+
+    t_estado_proceso anterior;
+    t_pcb* pcb = block_a_ready_sin_encolar(pl, pid, &anterior);
+
+    if (pcb != NULL) {
+        log_info(pl->logger, "## (%u) Pasa del estado %s al estado READY", pid, estado_to_string(anterior));
+        log_info(pl->logger, "## (%u) finalizó IO y pasa a READY", pid);
+        // Recien ahora el proceso queda visible para el corto plazo.
+        insertar_en_ready(pl, pcb, false);
+        pthread_mutex_unlock(&pl->mutex_fin_io);
+
+        habilitar_corto_plazo(pl, pcb, false);
+        return pcb;
+    }
+
+    // Se suspendio mientras esperaba la IO: SUSP. BLOCK -> SUSP. READY.
+    // No entra a READY, asi que no hay nada que señalizarle al corto plazo.
+    pcb = susp_block_a_susp_ready_sin_loguear(pl, pid, &anterior);
+    if (pcb != NULL) {
+        log_info(pl->logger, "## (%u) Pasa del estado %s al estado %s",
+                 pid, estado_to_string(anterior), estado_to_string(ESTADO_SUSP_READY));
+        log_info(pl->logger, "## (%u) finalizó IO y pasa a SUSP. READY", pid);
+        *estaba_suspendido = true;
+    }
+
+    pthread_mutex_unlock(&pl->mutex_fin_io);
+    return pcb;
 }
 
 // ============================================================
@@ -820,6 +905,7 @@ void planificador_registrar_cpu(t_planificador* pl, int socket_cpu, int id_cpu) 
     cpu->motivo_interrupcion = INT_NINGUNA;
     cpu->pid_preemptor = 0;
     cpu->prioridad_preemptor = 0;
+    cpu->prioridad_victima = 0;
 
     pthread_mutex_lock(&pl->mutex_cpus);
     list_add(pl->cpus_conectadas, cpu);
@@ -1005,7 +1091,12 @@ bool planificador_crear_segmento_km(t_planificador* pl, uint32_t pid, uint32_t i
 
     if (respuesta == MENSAJE_COMPACTACION) {
         if (hubo_compactacion != NULL) *hubo_compactacion = true;
-        log_info(pl->logger, "Kernel Memory pide compactar: desalojando todas las CPUs...");
+
+        // Los logs de inicio/fin encierran toda la ventana en que la
+        // planificacion esta pausada por la compactacion: entre los dos no se
+        // despacha ningun proceso.
+        log_info(pl->logger, "## Inicio de compactación");
+        log_debug(pl->logger, "Kernel Memory pide compactar: desalojando todas las CPUs...");
 
         // 1) No despachar nada mas hasta que termine la compactacion
         pausar_planificacion(pl);
@@ -1024,6 +1115,10 @@ bool planificador_crear_segmento_km(t_planificador* pl, uint32_t pid, uint32_t i
         if (recv(pl->socket_memoria, &respuesta, sizeof(t_codigo_mensaje), MSG_WAITALL) <= 0) {
             respuesta = MENSAJE_ERROR;
         }
+
+        // Kernel Memory ya compacto y reintento el pedido: se cierra la ventana
+        // antes de reanudar, asi ningun despacho se cuela entre inicio y fin.
+        log_info(pl->logger, "## Fin de compactación");
 
         // 4) Replanificar normalmente
         reanudar_planificacion(pl);
@@ -1267,10 +1362,10 @@ static void* hilo_ejecutar_io(void* arg) {
 
     // El proceso pudo haberse suspendido mientras esperaba la IO: en ese caso
     // pasa a SUSP. READY (su memoria sigue en SWAP) en vez de READY.
+    // Los dos logs del fin de IO los emite desbloquear_por_fin_io, que los
+    // mantiene juntos y recien despues habilita al corto plazo.
     bool estaba_suspendido = false;
-    planificador_desbloquear(pl, pcb->pid, &estaba_suspendido);
-    log_info(pl->logger, "## (%u) finalizó IO y pasa a %s",
-             pcb->pid, estaba_suspendido ? "SUSP. READY" : "READY");
+    desbloquear_por_fin_io(pl, pcb->pid, &estaba_suspendido);
 
     if (estaba_suspendido) {
         // Quedo elegible para des-suspenderse si ya hay lugar en memoria
@@ -1367,7 +1462,7 @@ static void cambiar_prioridad(t_planificador* pl, t_pcb* pcb, int nueva) {
     }
     pthread_mutex_unlock(&pl->mutex_cola_ready);
 
-    log_info(pl->logger, "## %u Cambio de prioridad: %d %d", pcb->pid, anterior, nueva);
+    log_info(pl->logger, "## %u Cambio de prioridad: %d - %d", pcb->pid, anterior, nueva);
 }
 
 void planificador_crear_mutex(t_planificador* pl, char* nombre) {

@@ -178,6 +178,7 @@ void atender_peticiones_cpu(int socket_cpu, int32_t id_cpu) {
         t_motivo_interrupcion motivo_int = cpu->motivo_interrupcion;
         uint32_t pid_preemptor = cpu->pid_preemptor;
         int prioridad_preemptor = cpu->prioridad_preemptor;
+        int prioridad_victima = cpu->prioridad_victima;
         cpu->en_rafaga = false;
         cpu->motivo_interrupcion = INT_NINGUNA;
         pthread_mutex_unlock(&_planificador->mutex_cpus);
@@ -422,9 +423,12 @@ void atender_peticiones_cpu(int socket_cpu, int32_t id_cpu) {
                             planificador_transicionar_exec_a_ready_frente(_planificador, pcb_ejecutando);
                             break;
                         case INT_PREEMPCION:
-                            // El log obligatorio ya se emitio al enviar la interrupcion
-                            (void) pid_preemptor;
-                            (void) prioridad_preemptor;
+                            // El desalojo se loguea aca (no al enviar la interrupcion):
+                            // recien con el proceso de vuelta se sabe que volvio por la
+                            // interrupcion y no por una syscall o EXIT anteriores.
+                            log_info(_logger,
+                                "## (%u) Prioridad: %d - Desalojado por cola más prioritaria por el proceso %u con prioridad %d",
+                                pid_ejec, prioridad_victima, pid_preemptor, prioridad_preemptor);
                             planificador_transicionar_exec_a_ready(_planificador, pcb_ejecutando);
                             break;
                         case INT_QUANTUM:
