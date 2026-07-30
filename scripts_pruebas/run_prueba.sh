@@ -1,7 +1,7 @@
 #!/bin/bash
 # Runner de pruebas oficiales.
 # Uso: run_prueba.sh <km_cfg> <ks_cfg> <script_inicial> <duracion_s> <sticks: "cfg:size cfg:size ..."> [archivo_stdin]
-BASE=/home/sepo010/Escritorio/tp-operativos-fake
+BASE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 export LIBRARY_PATH=/tmp/rl
 
 KM_CFG=$1; KS_CFG=$2; SCRIPT=$3; DUR=$4; STICKS=$5; STDIN_FILE=$6

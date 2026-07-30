@@ -1,8 +1,8 @@
 #!/bin/bash
 # Bateria completa de pruebas oficiales. Guarda los logs de cada prueba en
 # scratchpad/resultados/<nombre>/ para analisis posterior.
-SCRATCH=/home/sepo010/Escritorio/tp-operativos-fake/scripts_pruebas
-BASE=/home/sepo010/Escritorio/tp-operativos-fake
+BASE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SCRATCH="$BASE/scripts_pruebas"
 RES=$SCRATCH/resultados
 mkdir -p $RES
 
