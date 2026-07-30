@@ -542,10 +542,10 @@ Sin estructuras administrativas propias (las administra KM), tal como pide el en
 | `## (<PID>) finalizó IO y pasa a READY / SUSP. READY` | `planificador.c:1272` |
 | `## (<PID>) Toma el Mutex <M>` | `conexiones.c:281` y `planificador.c:1468` |
 | `## (<PID>) Libera el Mutex <M>` | `conexiones.c:306` |
-| `## <PID> Cambio de prioridad: <A> - <B>` | `planificador.c:1370` ⚠ ver §9 |
+| `## <PID> Cambio de prioridad: <A> - <B>` | `planificador.c:1370` |
 | `## (<PID>) - Desalojado por fin de quantum` | `conexiones.c:432` |
-| `## (<PID>) Prioridad: <P> - Desalojado por cola más prioritaria...` | `planificador.c:63-65` ⚠ ver §9 |
-| `## Inicio de compactación` / `## Fin de compactación` | ⚠ ver §9 (se emiten en KM: `gestor_memoria.c:567` y `:595`) |
+| `## (<PID>) Prioridad: <P> - Desalojado por cola más prioritaria...` | `planificador.c:63-65` |
+| `## Inicio de compactación` / `## Fin de compactación` | `planificador.c:1098` y `:1121` (el KM además los emite en `gestor_memoria.c:567` y `:595`) |
 | `## (<PID>) finalizó su ejecución con motivo de <MOTIVO>` | `planificador.c:479` (BSOD: `:1075`) |
 
 ### Kernel Memory
@@ -590,33 +590,51 @@ Sin estructuras administrativas propias (las administra KM), tal como pide el en
 
 ## 9. Desvíos detectados contra el enunciado
 
-Encontrados al cruzar el PDF con el código. Todos son de formato de log obligatorio,
-que es criterio de evaluabilidad del TP (enunciado p.7: "En caso de no cumplir con los
-logs mínimos... el TP no es apto para ser evaluado").
+**No queda ninguno.** Los tres que este documento listaba eran falsos. Verificado
+corriendo las 6 pruebas oficiales y contrastando la salida real contra el texto
+literal del PDF (2026-07-30).
 
-1. ~~**Cambio de prioridad — falta el guion separador.**~~ **FALSO — verificado contra el PDF.**
-   El enunciado NO lleva guion: `## <PID> Cambio de prioridad: <PRIORIDAD_ANTERIOR> <PRIORIDAD_NUEVA>`.
-   El código (`planificador.c:1370`) coincide exactamente. Ejercitado y confirmado por
-   `pruebas_unitarias/syscalls_mutex_herencia/`.
+El criterio de evaluabilidad sigue vigente (enunciado p.7: "En caso de no cumplir
+con los logs mínimos... el TP no es apto para ser evaluado"), pero el código lo
+cumple.
 
-2. ~~**Desalojo por cola más prioritaria — falta el guion separador.**~~ **FALSO — verificado contra el PDF.**
-   El enunciado NO lleva guion: `## (<PID>) Prioridad: <PRIORIDAD_DESALOJADO> Desalojado por
-   cola más prioritaria por el proceso <PID> con prioridad <PRIORIDAD_NUEVA>`.
-   El código (`planificador.c:64`) coincide exactamente. Ejercitado y confirmado por
-   `pruebas_unitarias/pcp_cmn_con_desalojo/`.
+1. ~~**Cambio de prioridad — falta el guion separador.**~~ **NO es un desvío.**
+   El enunciado **SÍ** lleva guion. Texto literal del PDF (viene cortado en dos
+   renglones, que es lo que indujo el error):
 
-   > Los puntos 1 y 2 estaban mal en una versión anterior de este documento: se afirmaba un
-   > guion que el enunciado no pide. Corregidos tras contrastar el texto literal del PDF
-   > (`pdftotext "Plug & Pray.pdf"`, sección "Logs mínimos y obligatorios" del Kernel
-   > Scheduler). **Antes de "corregir" un log, leer el PDF, no este documento.**
+   ```
+   Cambio de prioridad de Proceso: “## <PID> Cambio de prioridad: <PRIORIDAD_ANTERIOR> -
+   <PRIORIDAD_NUEVA>”
+   ```
 
-3. **`## Inicio de compactación` / `## Fin de compactación` figuran en la lista de logs
-   obligatorios del Kernel Scheduler pero se emiten sólo en el Kernel Memory**
-   (`gestor_memoria.c:567` y `:595`). Éste **sí** es un desvío real: los dos strings están
-   entre los "Logs mínimos y obligatorios" de la sección del Kernel Scheduler, justo antes
-   de `## (<PID>) finalizó su ejecución con motivo de <MOTIVO>`. El KS loguea el desalojo
-   (`planificador.c:1008`) pero no esos dos strings exactos.
-   Verificado por `pruebas_unitarias/dessuspension_compactacion/`.
+   El código (`planificador.c:1370`) emite el guion y coincide. Salida real de la
+   Prueba Herencia de Prioridades: `## 2 Cambio de prioridad: 4 - 1`.
+
+2. ~~**Desalojo por cola más prioritaria — falta el guion separador.**~~ **NO es un desvío.**
+   Igual que el punto 1: el enunciado **SÍ** lleva guion, cortado entre renglones.
+
+   ```
+   Desalojo por Cola más prioritaria: “## (<PID>) Prioridad: <PRIORIDAD_DESALOJADO> -
+   Desalojado por cola más prioritaria por el proceso <PID> con prioridad <PRIORIDAD_NUEVA>”
+   ```
+
+   El código (`planificador.c:64`) coincide. Salida real de la Prueba PCP:
+   `## (1) Prioridad: 3 - Desalojado por cola más prioritaria por el proceso 7 con prioridad 1`.
+
+   > Cuidado con este error: se comete al leer la salida de `pdftotext`, donde el
+   > guion queda al final de un renglón y parece no existir. **Antes de "corregir"
+   > un log, mirar el PDF con el guion incluido y correr la prueba que lo ejercita.**
+
+3. ~~**`## Inicio de compactación` / `## Fin de compactación` sólo se emiten en Kernel
+   Memory.**~~ **NO es un desvío.** El Kernel Scheduler **también** los emite, en
+   `planificador.c:1098` y `:1121`, encerrando la ventana en que la planificación
+   está pausada. Confirmado corriendo la Prueba Memoria con `ALLOCATION_STRATEGY=WORST`
+   (única de las dos que dispara compactación):
+
+   ```
+   [INFO] KERNEL_SCHEDULER/(...): ## Inicio de compactación
+   [INFO] KERNEL_SCHEDULER/(...): ## Fin de compactación
+   ```
 
 4. **Riesgo de desincronización del protocolo** (no es un log, es correctitud): en
    `atender_peticiones_cpu()`, para `MUTEX_*`, `MEM_ALLOC` y `MEM_FREE`, el `recv` del

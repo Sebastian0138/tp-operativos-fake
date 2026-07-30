@@ -1,15 +1,26 @@
-==259135== Memcheck, a memory error detector
-==259135== Copyright (C) 2002-2022, and GNU GPL'd, by Julian Seward et al.
-==259135== Using Valgrind-3.22.0 and LibVEX; rerun with -h for copyright info
-==259135== Command: ./bin/io config/io.cfg STDOUT
-==259135== Parent PID: 259082
-==259135== 
-==259135== 
-==259135== HEAP SUMMARY:
-==259135==     in use at exit: 0 bytes in 0 blocks
-==259135==   total heap usage: 259 allocs, 259 frees, 30,198 bytes allocated
-==259135== 
-==259135== All heap blocks were freed -- no leaks are possible
-==259135== 
-==259135== For lists of detected and suppressed errors, rerun with: -s
-==259135== ERROR SUMMARY: 0 errors from 0 contexts (suppressed: 0 from 0)
+==145310== Memcheck, a memory error detector
+==145310== Copyright (C) 2002-2022, and GNU GPL'd, by Julian Seward et al.
+==145310== Using Valgrind-3.22.0 and LibVEX; rerun with -h for copyright info
+==145310== Command: ./bin/io config/io.cfg STDOUT
+==145310== Parent PID: 145238
+==145310== 
+==145310== 
+==145310== Process terminating with default action of signal 15 (SIGTERM)
+==145310==    at 0x49ADCFD: recv (recv.c:28)
+==145310==    by 0x109B15: main (main.c:120)
+==145310== 
+==145310== HEAP SUMMARY:
+==145310==     in use at exit: 9,491 bytes in 16 blocks
+==145310==   total heap usage: 206 allocs, 190 frees, 28,817 bytes allocated
+==145310== 
+==145310== LEAK SUMMARY:
+==145310==    definitely lost: 0 bytes in 0 blocks
+==145310==    indirectly lost: 0 bytes in 0 blocks
+==145310==      possibly lost: 0 bytes in 0 blocks
+==145310==    still reachable: 9,491 bytes in 16 blocks
+==145310==         suppressed: 0 bytes in 0 blocks
+==145310== Reachable blocks (those to which a pointer was found) are not shown.
+==145310== To see them, rerun with: --leak-check=full --show-leak-kinds=all
+==145310== 
+==145310== For lists of detected and suppressed errors, rerun with: -s
+==145310== ERROR SUMMARY: 0 errors from 0 contexts (suppressed: 0 from 0)

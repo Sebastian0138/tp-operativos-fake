@@ -7,8 +7,8 @@ REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SCRATCH="$REPO/scripts_pruebas"
 PRUEBAS=$REPO/pruebas_oficiales/plug-n-pray-pruebas
 PAR=$SCRATCH/paralelo
-rm -rf $PAR
-mkdir -p $PAR
+rm -rf "$PAR"
+mkdir -p "$PAR"
 export LIBRARY_PATH=/tmp/rl
 
 # ---------- armado de un sandbox ----------
@@ -23,11 +23,11 @@ preparar_y_correr() {
     local D=$PAR/$nombre
 
     for m in kernel_scheduler kernel_memory memory_stick cpu io swap; do
-        mkdir -p $D/$m/bin $D/$m/config $D/$m/logs
-        cp $REPO/$m/bin/* $D/$m/bin/
+        mkdir -p "$D/$m/bin" "$D/$m/config" "$D/$m/logs"
+        cp "$REPO/$m/bin/"* "$D/$m/bin/"
     done
 
-    cat > $D/kernel_scheduler/config/ks.cfg << EOF
+    cat > "$D/kernel_scheduler/config/ks.cfg" << EOF
 LOG_LEVEL=INFO
 PLANIFICATION_ALGORITHM=$ks_alg
 QUEUES_ALGORITHMS=$ks_queues
@@ -39,7 +39,7 @@ LISTEN_PORT=$KS_PORT
 IP_MEMORY=127.0.0.1
 PORT_MEMORY=$KM_PORT
 EOF
-    cat > $D/kernel_memory/config/km.cfg << EOF
+    cat > "$D/kernel_memory/config/km.cfg" << EOF
 LOG_LEVEL=INFO
 SEGMENT_MAX_SIZE=$seg_max
 ALLOCATION_STRATEGY=$strategy
@@ -49,19 +49,19 @@ SCRIPTS_BASEPATH=$PRUEBAS
 LISTEN_IP=0.0.0.0
 LISTEN_PORT=$KM_PORT
 EOF
-    cat > $D/cpu/config/cpu.cfg << EOF
+    cat > "$D/cpu/config/cpu.cfg" << EOF
 LOG_LEVEL=INFO
 IP_KERNEL_SCHEDULER=127.0.0.1
 PORT_KERNEL_SCHEDULER=$KS_PORT
 IP_KERNEL_MEMORY=127.0.0.1
 PORT_KERNEL_MEMORY=$KM_PORT
 EOF
-    cat > $D/io/config/io.cfg << EOF
+    cat > "$D/io/config/io.cfg" << EOF
 LOG_LEVEL=INFO
 IP_KERNEL_SCHEDULER=127.0.0.1
 PORT_KERNEL_SCHEDULER=$KS_PORT
 EOF
-    cat > $D/swap/config/swap.cfg << EOF
+    cat > "$D/swap/config/swap.cfg" << EOF
 LOG_LEVEL=INFO
 SWAP_FILE_PATH=./swap.bin
 SWAP_FILE_SIZE=1048576
@@ -71,12 +71,12 @@ PORT_KERNEL_MEMORY=$KM_PORT
 EOF
 
     # --- arranque (mismo orden que la guia de deploy) ---
-    cd $D/kernel_memory && setsid $D/kernel_memory/bin/kernel_memory config/km.cfg > /dev/null 2>&1 &
+    cd "$D/kernel_memory" && setsid "$D/kernel_memory/bin/kernel_memory" config/km.cfg > /dev/null 2>&1 &
     sleep 0.7
     local i=0
     for tam in "${sticks[@]}"; do
         local SP=$((P + 3 + i))
-        cat > $D/memory_stick/config/stick_$i.cfg << EOF
+        cat > "$D/memory_stick/config/stick_$i.cfg" << EOF
 LOG_LEVEL=INFO
 MEMORY_DELAY=1500
 LISTEN_IP=127.0.0.1
@@ -85,27 +85,27 @@ IP_KERNEL_MEMORY=127.0.0.1
 PORT_KERNEL_MEMORY=$KM_PORT
 EOF
         # cada stick con su propio dir de logs para no pisarse entre si
-        mkdir -p $D/memory_stick/s$i/bin $D/memory_stick/s$i/logs $D/memory_stick/s$i/config
-        cp $D/memory_stick/bin/* $D/memory_stick/s$i/bin/
-        cp $D/memory_stick/config/stick_$i.cfg $D/memory_stick/s$i/config/
-        cd $D/memory_stick/s$i && setsid $D/memory_stick/s$i/bin/memory_stick config/stick_$i.cfg "$tam" > /dev/null 2>&1 &
+        mkdir -p "$D/memory_stick/s$i/bin" "$D/memory_stick/s$i/logs" "$D/memory_stick/s$i/config"
+        cp "$D/memory_stick/bin/"* "$D/memory_stick/s$i/bin/"
+        cp "$D/memory_stick/config/stick_$i.cfg" "$D/memory_stick/s$i/config/"
+        cd "$D/memory_stick/s$i" && setsid "$D/memory_stick/s$i/bin/memory_stick" config/stick_$i.cfg "$tam" > /dev/null 2>&1 &
         sleep 0.3
         i=$((i+1))
     done
-    cd $D/swap && setsid $D/swap/bin/swap config/swap.cfg > /dev/null 2>&1 &
+    cd "$D/swap" && setsid "$D/swap/bin/swap" config/swap.cfg > /dev/null 2>&1 &
     sleep 0.3
-    cd $D/kernel_scheduler && setsid $D/kernel_scheduler/bin/kernel_scheduler config/ks.cfg "$script" > /dev/null 2>&1 &
+    cd "$D/kernel_scheduler" && setsid "$D/kernel_scheduler/bin/kernel_scheduler" config/ks.cfg "$script" > /dev/null 2>&1 &
     sleep 0.6
-    cd $D/io
-    setsid $D/io/bin/io config/io.cfg SLEEP  > /dev/null 2>&1 &
-    setsid $D/io/bin/io config/io.cfg STDOUT > /dev/null 2>&1 &
+    cd "$D/io" || exit 1
+    setsid "$D/io/bin/io" config/io.cfg SLEEP  > /dev/null 2>&1 &
+    setsid "$D/io/bin/io" config/io.cfg STDOUT > /dev/null 2>&1 &
     if [ -n "$stdin_file" ]; then
-        setsid $D/io/bin/io config/io.cfg STDIN < "$stdin_file" > /dev/null 2>&1 &
+        setsid "$D/io/bin/io" config/io.cfg STDIN < "$stdin_file" > /dev/null 2>&1 &
     else
-        setsid $D/io/bin/io config/io.cfg STDIN < /dev/null > /dev/null 2>&1 &
+        setsid "$D/io/bin/io" config/io.cfg STDIN < /dev/null > /dev/null 2>&1 &
     fi
     sleep 0.3
-    cd $D/cpu && setsid $D/cpu/bin/cpu config/cpu.cfg 1 > /dev/null 2>&1 &
+    cd "$D/cpu" && setsid "$D/cpu/bin/cpu" config/cpu.cfg 1 > /dev/null 2>&1 &
 
     sleep "$dur"
     # matar SOLO los procesos de este sandbox (el path del sandbox esta en su cmdline)
