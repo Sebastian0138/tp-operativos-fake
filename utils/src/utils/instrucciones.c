@@ -19,8 +19,8 @@ const char* cod_instruccion_to_string(t_codigo_instruccion codigo) {
         case INST_MUTEX_UNLOCK:  return "MUTEX_UNLOCK";
         case INST_MEM_ALLOC:     return "MEM_ALLOC";
         case INST_MEM_FREE:      return "MEM_FREE";
-        case INST_IO_STDIN:      return "IO_STDIN";
-        case INST_IO_STDOUT:     return "IO_STDOUT";
+        case INST_IO_STDIN:      return "STDIN";
+        case INST_IO_STDOUT:     return "STDOUT";
         case INST_INIT_PROC:     return "INIT_PROC";
         case INST_EXIT:          return "EXIT";
         default:                 return "UNKNOWN";
