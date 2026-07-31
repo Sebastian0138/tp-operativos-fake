@@ -45,6 +45,13 @@ typedef struct {
     // cuando el mismo PID vuelve a la misma CPU (retorno directo de syscalls).
     uint32_t rafaga;
 
+    // Vencimiento ABSOLUTO del quantum de la rafaga en curso. Se fija cuando el
+    // proceso llega desde READY (rafaga "fresca") y NO se reinicia en los
+    // retornos directos de syscalls (MUTEX_*, MEM_*): asi el presupuesto de
+    // quantum mide la rafaga completa y una cadena de syscalls no puede
+    // resetearlo para monopolizar la CPU.
+    struct timespec quantum_deadline;
+
     t_motivo_interrupcion motivo_interrupcion;
     // Datos para el log de desalojo por cola mas prioritaria. Se completan al
     // enviar la interrupcion y los consume el hilo que atiende la respuesta de

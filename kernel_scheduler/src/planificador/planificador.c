@@ -328,6 +328,7 @@ typedef struct {
     uint32_t pid;
     int id_cpu;
     uint32_t rafaga;    // invalida el timer si la CPU ya arranco otra rafaga
+    struct timespec deadline;   // vencimiento absoluto del quantum de esa rafaga
 } t_timer_args;
 
 void* hilo_timer_quantum(void* arg) {
@@ -336,11 +337,19 @@ void* hilo_timer_quantum(void* arg) {
     uint32_t target_pid = args->pid;
     int target_cpu = args->id_cpu;
     uint32_t target_rafaga = args->rafaga;
-    int quantum_ms = pl->config->rr_quantum;
+    struct timespec deadline = args->deadline;
 
     free(args);
 
-    usleep(quantum_ms * 1000);
+    // Dormir SOLO hasta el vencimiento absoluto del quantum. Un retorno directo
+    // de syscall lanza otro timer con el MISMO deadline y una rafaga mayor: este
+    // se autodescarta por rafaga, pero el nuevo apunta al mismo instante, asi el
+    // presupuesto de la rafaga no se reinicia con cada syscall.
+    struct timespec ahora;
+    clock_gettime(CLOCK_MONOTONIC, &ahora);
+    long restante_ms = (deadline.tv_sec - ahora.tv_sec) * 1000L
+                     + (deadline.tv_nsec - ahora.tv_nsec) / 1000000L;
+    if (restante_ms > 0) usleep(restante_ms * 1000);
 
     pthread_mutex_lock(&pl->mutex_cpus);
     for (int i = 0; i < list_size(pl->cpus_conectadas); i++) {
@@ -370,7 +379,10 @@ void* hilo_timer_quantum(void* arg) {
 //   1) actualizar contexto en KM (sin locks propios tomados)
 //   2) mutex_compactacion: esperar que no haya compactacion en curso
 //   3) mutex_cpus: marcar la CPU ocupada y enviar el PID
-static void despachar(t_planificador* pl, t_pcb* pcb, t_cpu_conectada* cpu) {
+// rafaga_nueva: true cuando el proceso llega desde READY (arranca una rafaga y
+// su quantum se cuenta de cero); false en el retorno directo de una syscall, que
+// continua la misma rafaga y por lo tanto conserva el deadline de quantum.
+static void despachar(t_planificador* pl, t_pcb* pcb, t_cpu_conectada* cpu, bool rafaga_nueva) {
     planificador_actualizar_contexto_en_km(pl, pcb->pid, pcb->registros);
 
     pthread_mutex_lock(&pl->mutex_compactacion);
@@ -384,7 +396,22 @@ static void despachar(t_planificador* pl, t_pcb* pcb, t_cpu_conectada* cpu) {
     cpu->en_rafaga = true;
     cpu->rafaga++;
     cpu->motivo_interrupcion = INT_NINGUNA;
+
+    // El deadline del quantum solo se (re)fija al arrancar una rafaga fresca. En
+    // los retornos directos se conserva el que ya tenia, para que la cadena de
+    // syscalls no reinicie el presupuesto.
+    if (rafaga_nueva) {
+        long q_ms = pl->config->rr_quantum;
+        clock_gettime(CLOCK_MONOTONIC, &cpu->quantum_deadline);
+        cpu->quantum_deadline.tv_sec  += q_ms / 1000;
+        cpu->quantum_deadline.tv_nsec += (q_ms % 1000) * 1000000L;
+        if (cpu->quantum_deadline.tv_nsec >= 1000000000L) {
+            cpu->quantum_deadline.tv_sec  += 1;
+            cpu->quantum_deadline.tv_nsec -= 1000000000L;
+        }
+    }
     uint32_t rafaga = cpu->rafaga;
+    struct timespec deadline = cpu->quantum_deadline;
     int id_cpu = cpu->id_cpu;
 
     t_codigo_mensaje cod = MENSAJE_ENVIAR_PID;
@@ -402,6 +429,7 @@ static void despachar(t_planificador* pl, t_pcb* pcb, t_cpu_conectada* cpu) {
         t_args->pid = pcb->pid;
         t_args->id_cpu = id_cpu;
         t_args->rafaga = rafaga;
+        t_args->deadline = deadline;
 
         // Detached: el hilo libera sus recursos al terminar, nadie lo joinea.
         // Si no se pudo crear hay que liberar los args a mano (si no, se pierden)
@@ -418,7 +446,8 @@ static void despachar(t_planificador* pl, t_pcb* pcb, t_cpu_conectada* cpu) {
 }
 
 void planificador_despachar_directo(t_planificador* pl, t_pcb* pcb, t_cpu_conectada* cpu) {
-    despachar(pl, pcb, cpu);
+    // Retorno directo de syscall: continua la misma rafaga, conserva el quantum.
+    despachar(pl, pcb, cpu, false);
 }
 
 // Hilo de Corto Plazo (READY -> EXEC)
@@ -465,7 +494,8 @@ void* hilo_planificador_corto_plazo(void* arg) {
 
         log_info(pl->logger, "## (%u) Pasa del estado %s al estado EXEC", pcb->pid, estado_to_string(anterior));
 
-        despachar(pl, pcb, cpu_libre);
+        // Llega desde READY: rafaga fresca, el quantum se cuenta de cero.
+        despachar(pl, pcb, cpu_libre, true);
     }
     return NULL;
 }
@@ -902,6 +932,7 @@ void planificador_registrar_cpu(t_planificador* pl, int socket_cpu, int id_cpu) 
     cpu->pid_ejecutando = 0;
     cpu->en_rafaga = false;
     cpu->rafaga = 0;
+    cpu->quantum_deadline = (struct timespec){0, 0};   // lo fija el primer despacho fresco
     cpu->motivo_interrupcion = INT_NINGUNA;
     cpu->pid_preemptor = 0;
     cpu->prioridad_preemptor = 0;
